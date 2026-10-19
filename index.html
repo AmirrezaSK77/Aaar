@@ -1,0 +1,740 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<title>فرار خرگوش از گرگ</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: radial-gradient(circle at center, #1a2a1a, #050a05);
+    display: flex; justify-content: center; align-items: center;
+    height: 100vh; overflow: hidden; font-family: Tahoma, sans-serif;
+  }
+  #gameContainer { position: relative; }
+  canvas {
+    display: block; border-radius: 16px;
+    box-shadow: 0 0 40px rgba(0,255,100,0.3), 0 0 80px rgba(0,0,0,0.8);
+    cursor: crosshair;
+  }
+  #hud {
+    position: absolute; top: 12px; right: 12px; left: 12px;
+    display: flex; justify-content: space-between;
+    pointer-events: none; color: white; font-size: 18px;
+    text-shadow: 0 0 8px black, 0 0 4px black;
+  }
+  .stat {
+    background: rgba(0,0,0,0.55); padding: 8px 16px; border-radius: 10px;
+    border: 1px solid rgba(255,255,255,0.15); backdrop-filter: blur(4px);
+  }
+  #overlay {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    justify-content: center; align-items: center; gap: 18px;
+    background: rgba(0,0,0,0.78); border-radius: 16px;
+    color: white; text-align: center; padding: 20px;
+    transition: opacity 0.3s; backdrop-filter: blur(6px);
+  }
+  #overlay.hidden { opacity: 0; pointer-events: none; }
+  #overlay h1 { font-size: 34px; text-shadow: 0 0 20px #0f0; }
+  #overlay p { font-size: 16px; opacity: 0.9; line-height: 1.9; }
+  #overlay button {
+    padding: 12px 34px; font-size: 20px; border: none; border-radius: 50px;
+    background: linear-gradient(135deg, #2ecc71, #27ae60); color: white;
+    cursor: pointer; font-family: inherit;
+    box-shadow: 0 6px 20px rgba(46,204,113,0.5);
+    transition: transform 0.15s, box-shadow 0.15s;
+  }
+  #overlay button:hover { transform: scale(1.06); box-shadow: 0 8px 28px rgba(46,204,113,0.7); }
+  .key { background:#333; padding:2px 8px; border-radius:5px; border:1px solid #555; display:inline-block; }
+</style>
+</head>
+<body>
+<div id="gameContainer">
+  <canvas id="game" width="900" height="620"></canvas>
+  <div id="hud">
+    <div class="stat">🥕 امتیاز: <span id="score">0</span></div>
+    <div class="stat">❤️ جان: <span id="lives">3</span></div>
+    <div class="stat">⏱️ زمان: <span id="time">0</span>s</div>
+    <div class="stat">🐺 گرگ: <span id="wolves">0</span></div>
+  </div>
+  <div id="overlay">
+    <h1>🐰 فرار خرگوش از گرگ 🐺</h1>
+    <p>
+      با <span class="key">WASD</span> یا <span class="key">کلیدهای جهت‌دار</span> حرکت کن<br>
+      🥕 هویج‌ها را جمع کن تا امتیاز بگیری<br>
+      ⚡ آیتم سرعت، 🛡️ سپر و ⏳ کندی زمان را بگیر<br>
+      گرگ‌ها باهوش‌اند! از آن‌ها فرار کن
+    </p>
+    <button id="startBtn">شروع بازی</button>
+  </div>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+
+  const $ = id => document.getElementById(id);
+  const ui = { score: $('score'), lives: $('lives'), time: $('time'), wolves: $('wolves') };
+  const overlay = $('overlay');
+  const startBtn = $('startBtn');
+
+  // ---------- ورودی ----------
+  const keys = {};
+  addEventListener('keydown', e => {
+    keys[e.key.toLowerCase()] = true;
+    if (['arrowup','arrowdown','arrowleft','arrowright',' '].includes(e.key.toLowerCase())) e.preventDefault();
+  });
+  addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+
+  // ---------- کمکی ----------
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const angleTo = (a, b) => Math.atan2(b.y - a.y, b.x - a.x);
+
+  // ---------- وضعیت بازی ----------
+  let state = 'menu';
+  let rabbit, wolves, carrots, powerups, particles, floatingTexts;
+  let score, lives, timeElapsed, spawnTimer, powerupTimer, difficulty;
+  let lastTime = 0, gameTime = 0;
+  let shakeAmount = 0;
+  let banner = null;
+
+  // ---------- ذرات ----------
+  class Particle {
+    constructor(x, y, color, opts = {}) {
+      this.x = x; this.y = y;
+      const speed = opts.speed ?? rand(1, 4);
+      const ang = opts.angle ?? rand(0, Math.PI * 2);
+      this.vx = Math.cos(ang) * speed;
+      this.vy = Math.sin(ang) * speed;
+      this.life = opts.life ?? rand(20, 45);
+      this.maxLife = this.life;
+      this.color = color;
+      this.size = opts.size ?? rand(2, 5);
+      this.gravity = opts.gravity ?? 0;
+    }
+    update() {
+      this.x += this.vx;
+      this.y += this.vy;
+      this.vy += this.gravity;
+      this.vx *= 0.97;
+      this.vy *= 0.97;
+      this.life--;
+    }
+    draw() {
+      const a = clamp(this.life / this.maxLife, 0, 1);
+      ctx.globalAlpha = a;
+      ctx.fillStyle = this.color;
+      ctx.beginPath();
+      ctx.arc(this.x, this.y, this.size * a, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  // ---------- متن شناور ----------
+  class FloatingText {
+    constructor(x, y, text, color) {
+      this.x = x; this.y = y; this.text = text; this.color = color;
+      this.life = 60; this.vy = -1.2;
+    }
+    update() { this.y += this.vy; this.life--; }
+    draw() {
+      ctx.globalAlpha = clamp(this.life / 60, 0, 1);
+      ctx.fillStyle = this.color;
+      ctx.font = 'bold 20px Tahoma';
+      ctx.textAlign = 'center';
+      ctx.fillText(this.text, this.x, this.y);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  // ---------- خرگوش ----------
+  class Rabbit {
+    constructor() {
+      this.x = W / 2; this.y = H / 2;
+      this.r = 16;
+      this.baseSpeed = 4.2;
+      this.vx = 0; this.vy = 0;
+      this.angle = 0; // جهت نگاه
+      this.hopPhase = 0;
+      this.shield = 0;       // زمان سپر (فریم)
+      this.speedBoost = 0;   // زمان سرعت (فریم)
+      this.invuln = 0;       // نامیرایی بعد از برخورد
+      this.trail = [];
+    }
+    get speed() {
+      return this.speedBoost > 0 ? this.baseSpeed * 1.85 : this.baseSpeed;
+    }
+    update(dt) {
+      let dx = 0, dy = 0;
+      if (keys['w'] || keys['arrowup']) dy -= 1;
+      if (keys['s'] || keys['arrowdown']) dy += 1;
+      if (keys['a'] || keys['arrowleft']) dx -= 1;
+      if (keys['d'] || keys['arrowright']) dx += 1;
+      const len = Math.hypot(dx, dy);
+      if (len > 0) {
+        dx /= len; dy /= len;
+        this.vx = dx * this.speed;
+        this.vy = dy * this.speed;
+        this.angle = Math.atan2(dy, dx);
+        this.hopPhase += 0.35;
+      } else {
+        this.vx *= 0.8; this.vy *= 0.8;
+      }
+      this.x = clamp(this.x + this.vx, this.r, W - this.r);
+      this.y = clamp(this.y + this.vy, this.r, H - this.r);
+
+      // مسیر حرکت (trail)
+      this.trail.push({ x: this.x, y: this.y, life: 14 });
+      if (this.trail.length > 14) this.trail.shift();
+      this.trail.forEach(t => t.life--);
+
+      if (this.shield > 0) this.shield--;
+      if (this.speedBoost > 0) this.speedBoost--;
+      if (this.invuln > 0) this.invuln--;
+    }
+    draw() {
+      // سایه
+      ctx.fillStyle = 'rgba(0,0,0,0.35)';
+      ctx.beginPath();
+      ctx.ellipse(this.x, this.y + this.r * 0.9, this.r * 0.9, this.r * 0.35, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // مسیر
+      this.trail.forEach(t => {
+        if (t.life > 0) {
+          ctx.globalAlpha = (t.life / 14) * 0.25;
+          ctx.fillStyle = '#8dfba5';
+          ctx.beginPath();
+          ctx.arc(t.x, t.y, this.r * 0.5, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      });
+      ctx.globalAlpha = 1;
+
+      // پرش انیمیشن
+      const hop = Math.abs(Math.sin(this.hopPhase)) * 4;
+
+      ctx.save();
+      ctx.translate(this.x, this.y - hop);
+      ctx.rotate(this.angle);
+
+      // سپر
+      if (this.shield > 0) {
+        const s = this.r + 8 + Math.sin(gameTime * 0.3) * 3;
+        ctx.strokeStyle = `rgba(80,200,255,${0.5 + 0.4 * Math.sin(gameTime * 0.2)})`;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(0, 0, s, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(80,200,255,0.12)';
+        ctx.fill();
+      }
+
+      // نامیرایی
+      let alpha = 1;
+      if (this.invuln > 0 && Math.floor(this.invuln / 4) % 2 === 0) alpha = 0.4;
+      ctx.globalAlpha = alpha;
+
+      // بدن
+      ctx.fillStyle = '#f5f5f5';
+      ctx.beginPath();
+      ctx.ellipse(0, 0, this.r * 1.15, this.r * 0.85, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // گوش‌ها
+      ctx.fillStyle = '#f0f0f0';
+      ctx.beginPath();
+      ctx.ellipse(this.r * 0.4, -this.r * 0.9, this.r * 0.28, this.r * 0.7, -0.3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.ellipse(this.r * 0.05, -this.r * 1.0, this.r * 0.25, this.r * 0.65, 0.15, 0, Math.PI * 2);
+      ctx.fill();
+      // داخل گوش
+      ctx.fillStyle = '#ffb3c6';
+      ctx.beginPath();
+      ctx.ellipse(this.r * 0.4, -this.r * 0.9, this.r * 0.14, this.r * 0.45, -0.3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.ellipse(this.r * 0.05, -this.r * 1.0, this.r * 0.12, this.r * 0.4, 0.15, 0, Math.PI * 2);
+      ctx.fill();
+
+      // چشم
+      ctx.fillStyle = '#111';
+      ctx.beginPath();
+      ctx.arc(this.r * 0.55, -this.r * 0.15, this.r * 0.13, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = 'white';
+      ctx.beginPath();
+      ctx.arc(this.r * 0.6, -this.r * 0.2, this.r * 0.05, 0, Math.PI * 2);
+      ctx.fill();
+
+      // بینی
+      ctx.fillStyle = '#ff85a1';
+      ctx.beginPath();
+      ctx.arc(this.r * 1.0, 0, this.r * 0.12, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.globalAlpha = 1;
+      ctx.restore();
+
+      // افکت سرعت
+      if (this.speedBoost > 0) {
+        for (let i = 0; i < 3; i++) {
+          const a = rand(0, Math.PI * 2);
+          const d = this.r + rand(5, 15);
+          ctx.fillStyle = `rgba(255,230,100,${rand(0.2, 0.6)})`;
+          ctx.beginPath();
+          ctx.arc(this.x + Math.cos(a) * d, this.y + Math.sin(a) * d, rand(2, 4), 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
+  }
+
+  // ---------- گرگ ----------
+  class Wolf {
+    constructor(x, y, level = 0) {
+      this.x = x; this.y = y;
+      this.r = 17 + level * 2;
+      this.speed = 1.9 + level * 0.35 + Math.random() * 0.4;
+      this.level = level;
+      this.angle = 0;
+      this.legPhase = Math.random() * Math.PI * 2;
+      this.state = 'chase'; // chase, wander, flee, stun
+      this.wanderAngle = rand(0, Math.PI * 2);
+      this.stateTimer = 0;
+      this.stunTimer = 0;
+      this.stuckTimer = 0;
+      this.lastPos = { x, y };
+      this.packOffset = rand(-60, 60); // برای پراکندگی گله
+      this.hp = 1; // برای آینده
+      this.spawnAnim = 30;
+    }
+    update(dt, wolves, rabbit) {
+      if (this.spawnAnim > 0) { this.spawnAnim--; return; }
+
+      if (this.stunTimer > 0) {
+        this.stunTimer--;
+        return;
+      }
+
+      const dToRabbit = dist(this, rabbit);
+      this.angle = angleTo(this, rabbit);
+
+      // --- هوش پیشرفته ---
+      // اگر خرگوش سپر دارد، کمی محتاط می‌شود
+      const isShielded = rabbit.shield > 0;
+      // اگر خرگوش سرعت دارد، مستقیم نمی‌رود بلکه پیش‌بینی می‌کند
+      const rabbitMoving = Math.hypot(rabbit.vx, rabbit.vy) > 0.5;
+      
+      let targetX = rabbit.x;
+      let targetY = rabbit.y;
+
+      // پیش‌بینی موقعیت خرگوش (lead)
+      if (rabbitMoving) {
+        const lead = dToRabbit * 0.06;
+        targetX = rabbit.x + rabbit.vx * lead * 4;
+        targetY = rabbit.y + rabbit.vy * lead * 4;
+      }
+
+      // رفتار گله: گرگ‌ها کمی از هم فاصله بگیرند تا محاصره کنند
+      let packPushX = 0, packPushY = 0;
+      let nearby = 0;
+      for (const w of wolves) {
+        if (w === this) continue;
+        const d = dist(this, w);
+        if (d < 90 && d > 0.1) {
+          packPushX += (this.x - w.x) / d;
+          packPushY += (this.y - w.y) / d;
+          nearby++;
+        }
+      }
+      if (nearby > 0) {
+        packPushX /= nearby;
+        packPushY /= nearby;
+      }
+
+      // محاصره: اگر نزدیک خرگوش است و چند گرگ دیگر هم نزدیک‌اند، از طرف مقابل نزدیک شو
+      let tacticX = 0, tacticY = 0;
+      if (this.level >= 1 && dToRabbit < 220 && nearby > 0) {
+        // سعی کن از پشت خرگوش نزدیک شوی
+        const behindAngle = angleTo(rabbit, this) + Math.PI;
+        tacticX = Math.cos(behindAngle) * 0.4;
+        tacticY = Math.sin(behindAngle) * 0.4;
+      }
+
+      // جهت حرکت نهایی
+      let dx = (targetX - this.x) / (dToRabbit || 1);
+      let dy = (targetY - this.y) / (dToRabbit || 1);
+
+      // اگر سپر دارد، کمی دور بزند
+      if (isShielded) {
+        const perpAngle = angleTo(this, rabbit) + Math.PI / 2;
+        dx = Math.cos(perpAngle) * 0.8;
+        dy = Math.sin(perpAngle) * 0.8;
+      }
+
+      // ترکیب
+      dx += packPushX * 0.6 + tacticX;
+      dy += packPushY * 0.6 + tacticY;
+
+      const len = Math.hypot(dx, dy) || 1;
+      dx /= len; dy /= len;
+
+      let spd = this.speed;
+      // اگر خرگوش سرعت دارد، گرگ‌های سطح بالا کمی سریع‌تر می‌شوند
+      if (rabbit.speedBoost > 0) spd *= 1.15 + this.level * 0.08;
+
+      this.x += dx * spd;
+      this.y += dy * spd;
+      this.x = clamp(this.x, this.r, W - this.r);
+      this.y = clamp(this.y, this.r, H - this.r);
+      this.legPhase += spd * 0.25;
+
+      // تشخیص گیر کردن (برای پریدن روی خرگوش)
+      this.stuckTimer++;
+      if (this.stuckTimer > 20) {
+        const moved = Math.hypot(this.x - this.lastPos.x, this.y - this.lastPos.y);
+        if (moved < 2 && dToRabbit > 40) {
+          // تغییر مسیر تصادفی
+          this.x += rand(-30, 30);
+          this.y += rand(-30, 30);
+        }
+        this.lastPos = { x: this.x, y: this.y };
+        this.stuckTimer = 0;
+      }
+    }
+    draw() {
+      // سایه
+      ctx.fillStyle = 'rgba(0,0,0,0.35)';
+      ctx.beginPath();
+      ctx.ellipse(this.x, this.y + this.r * 0.85, this.r, this.r * 0.35, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      if (this.spawnAnim > 0) {
+        const s = 1 - this.spawnAnim / 30;
+        ctx.globalAlpha = s;
+        ctx.fillStyle = `rgba(180,50,50,${0.3 * s})`;
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.r * (1 + this.spawnAnim * 0.1), 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        if (this.spawnAnim > 20) return;
+      }
+
+      ctx.save();
+      ctx.translate(this.x, this.y);
+      ctx.rotate(this.angle);
+
+      // بدن گرگ
+      const bodyColor = this.level >= 2 ? '#4a4a55' : (this.level === 1 ? '#555566' : '#666677');
+      ctx.fillStyle = bodyColor;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, this.r * 1.2, this.r * 0.8, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // پاها (انیمیشن)
+      const legSwing = Math.sin(this.legPhase) * this.r * 0.4;
+      ctx.strokeStyle = '#333';
+      ctx.lineWidth = this.r * 0.25;
+      ctx.lineCap = 'round';
+      for (let i = 0; i < 4; i++) {
+        const lx = (i - 1.5) * this.r * 0.5;
+        const ly = this.r * 0.5;
+        ctx.beginPath();
+        ctx.moveTo(lx, ly);
+        ctx.lineTo(lx + legSwing * (i % 2 === 0 ? 1 : -1) * 0.5, ly + this.r * 0.6);
+        ctx.stroke();
+      }
+
+      // سر
+      ctx.fillStyle = bodyColor;
+      ctx.beginPath();
+      ctx.ellipse(this.r * 0.95, 0, this.r * 0.55, this.r * 0.5, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // گوش‌ها (مثلثی)
+      ctx.fillStyle = bodyColor;
+      ctx.beginPath();
+      ctx.moveTo(this.r * 0.8, -this.r * 0.35);
+      ctx.lineTo(this.r * 0.95, -this.r * 0.95);
+      ctx.lineTo(this.r * 1.15, -this.r * 0.35);
+      ctx.closePath();
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(this.r * 0.8, this.r * 0.35);
+      ctx.lineTo(this.r * 0.95, this.r * 0.95);
+      ctx.lineTo(this.r * 1.15, this.r * 0.35);
+      ctx.closePath();
+      ctx.fill();
+
+      // پوزه
+      ctx.fillStyle = '#2a2a35';
+      ctx.beginPath();
+      ctx.ellipse(this.r * 1.35, 0, this.r * 0.3, this.r * 0.25, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // بینی
+      ctx.fillStyle = '#111';
+      ctx.beginPath();
+      ctx.arc(this.r * 1.55, 0, this.r * 0.1, 0, Math.PI * 2);
+      ctx.fill();
+
+      // چشم‌ها (درخشان)
+      const eyeColor = this.level >= 2 ? '#ff4444' : '#ffaa00';
+      ctx.fillStyle = eyeColor;
+      ctx.shadowColor = eyeColor;
+      ctx.shadowBlur = 10;
+      ctx.beginPath();
+      ctx.arc(this.r * 0.95, -this.r * 0.2, this.r * 0.1, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(this.r * 0.95, this.r * 0.2, this.r * 0.1, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+
+      ctx.restore();
+
+      // نشانگر سطح بالای گرگ
+      if (this.level >= 1) {
+        ctx.fillStyle = this.level >= 2 ? '#ff5555' : '#ffaa00';
+        ctx.font = `bold ${12 + this.level * 2}px Tahoma`;
+        ctx.textAlign = 'center';
+        ctx.fillText(this.level >= 2 ? '👑' : '★', this.x, this.y - this.r - 12);
+      }
+    }
+  }
+
+  // ---------- آیتم‌ها ----------
+  class Carrot {
+    constructor(x, y) {
+      this.x = x; this.y = y;
+      this.r = 12;
+      this.life = 800; // ~13 ثانیه
+      this.bob = Math.random() * Math.PI * 2;
+      this.spawnAnim = 15;
+    }
+    update() {
+      this.bob += 0.08;
+      this.life--;
+      if (this.spawnAnim > 0) this.spawnAnim--;
+    }
+    draw() {
+      const yOff = Math.sin(this.bob) * 3;
+      const scale = this.spawnAnim > 0 ? (15 - this.spawnAnim) / 15 : 1;
+      ctx.save();
+      ctx.translate(this.x, this.y + yOff);
+      ctx.scale(scale, scale);
+
+      // سایه
+      ctx.fillStyle = 'rgba(0,0,0,0.25)';
+      ctx.beginPath();
+      ctx.ellipse(0, this.r + 3, this.r * 0.8, this.r * 0.25, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // درخشش
+      ctx.shadowColor = '#ffaa33';
+      ctx.shadowBlur = 15;
+
+      // هویج
+      ctx.fillStyle = '#ff8800';
+      ctx.beginPath();
+      ctx.moveTo(0, -this.r);
+      ctx.lineTo(this.r * 0.6, this.r * 0.8);
+      ctx.lineTo(-this.r * 0.6, this.r * 0.8);
+      ctx.closePath();
+      ctx.fill();
+
+      // خطوط هویج
+      ctx.strokeStyle = '#cc6600';
+      ctx.lineWidth = 1;
+      for (let i = 1; i < 4; i++) {
+        const yy = -this.r + (i / 4) * this.r * 1.6;
+        ctx.beginPath();
+        ctx.moveTo(-this.r * 0.35 * (1 - i * 0.15), yy);
+        ctx.lineTo(this.r * 0.35 * (1 - i * 0.15), yy);
+        ctx.stroke();
+      }
+      ctx.shadowBlur = 0;
+
+      // برگ
+      ctx.fillStyle = '#2ecc71';
+      ctx.beginPath();
+      ctx.ellipse(-3, -this.r - 2, 3, 7, -0.4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.ellipse(3, -this.r - 2, 3, 7, 0.4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.ellipse(0, -this.r - 4, 3, 8, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // نوار عمر
+      const lifeRatio = this.life / 800;
+      if (lifeRatio < 0.4) {
+        ctx.globalAlpha = 0.5 + 0.5 * Math.sin(gameTime * 0.3);
+      }
+      ctx.restore();
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  class PowerUp {
+    constructor(x, y, type) {
+      this.x = x; this.y = y;
+      this.r = 13;
+      this.type = type; // 'speed', 'shield', 'slow'
+      this.bob = Math.random() * Math.PI * 2;
+      this.life = 600;
+      this.spawnAnim = 20;
+    }
+    update() {
+      this.bob += 0.1;
+      this.life--;
+      if (this.spawnAnim > 0) this.spawnAnim--;
+    }
+    draw() {
+      const yOff = Math.sin(this.bob) * 4;
+      const scale = this.spawnAnim > 0 ? (20 - this.spawnAnim) / 20 : 1;
+      const colors = { speed: '#ffe066', shield: '#66ccff', slow: '#cc66ff' };
+      const icons = { speed: '⚡', shield: '🛡️', slow: '⏳' };
+      const c = colors[this.type];
+
+      ctx.save();
+      ctx.translate(this.x, this.y + yOff);
+      ctx.scale(scale, scale);
+
+      // سایه
+      ctx.fillStyle = 'rgba(0,0,0,0.25)';
+      ctx.beginPath();
+      ctx.ellipse(0, this.r + 6, this.r * 0.8, this.r * 0.25, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // حلقه درخشان
+      ctx.shadowColor = c;
+      ctx.shadowBlur = 20;
+      ctx.strokeStyle = c;
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.arc(0, 0, this.r, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // پس‌زمینه
+      ctx.fillStyle = c + '33';
+      ctx.beginPath();
+      ctx.arc(0, 0, this.r, 0, Math.PI * 2);
+      ctx.fill();
+
+      // آیکون
+      ctx.shadowBlur = 0;
+      ctx.font = `${this.r * 1.4}px serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = 'white';
+      ctx.fillText(icons[this.type], 0, 1);
+
+      ctx.restore();
+    }
+  }
+
+  // ---------- مدیریت بازی ----------
+  function reset() {
+    rabbit = new Rabbit();
+    wolves = [];
+    carrots = [];
+    powerups = [];
+    particles = [];
+    floatingTexts = [];
+    score = 0; lives = 3; timeElapsed = 0; gameTime = 0;
+    spawnTimer = 0; powerupTimer = 120; difficulty = 0;
+    shakeAmount = 0;
+    banner = null;
+    updateHUD();
+
+    // چند هویج اولیه
+    for (let i = 0; i < 5; i++) spawnCarrot();
+  }
+
+  function updateHUD() {
+    ui.score.textContent = score;
+    ui.lives.textContent = lives;
+    ui.time.textContent = Math.floor(timeElapsed / 60);
+    ui.wolves.textContent = wolves.length;
+  }
+
+  function spawnCarrot() {
+    let x, y, tries = 0;
+    do {
+      x = rand(40, W - 40);
+      y = rand(40, H - 40);
+      tries++;
+    } while (rabbit && dist({ x, y }, rabbit) < 80 && tries < 20);
+    carrots.push(new Carrot(x, y));
+  }
+
+  function spawnPowerUp() {
+    const types = ['speed', 'shield', 'slow'];
+    const type = types[Math.floor(Math.random() * types.length)];
+    const x = rand(50, W - 50);
+    const y = rand(50, H - 50);
+    powerups.push(new PowerUp(x, y, type));
+  }
+
+  function spawnWolf() {
+    // گرگ از لبه صفحه ظاهر می‌شود
+    const side = Math.floor(Math.random() * 4);
+    let x, y;
+    if (side === 0) { x = rand(0, W); y = -30; }
+    else if (side === 1) { x = W + 30; y = rand(0, H); }
+    else if (side === 2) { x = rand(0, W); y = H + 30; }
+    else { x = -30; y = rand(0, H); }
+
+    const level = Math.min(3, Math.floor(timeElapsed / 900) + (Math.random() < 0.3 ? 1 : 0));
+    wolves.push(new Wolf(x, y, level));
+
+    // افکت ورود
+    for (let i = 0; i < 10; i++) {
+      particles.push(new Particle(x, y, '#aa3333', { speed: rand(1, 4), life: rand(15, 30) }));
+    }
+  }
+
+  function showBanner(text, color) {
+    banner = { text, color, life: 90 };
+  }
+
+  // ---------- برخوردها ----------
+  function handleCollisions() {
+    // خرگوش با هویج
+    for (let i = carrots.length - 1; i >= 0; i--) {
+      const c = carrots[i];
+      if (dist(rabbit, c) < rabbit.r + c.r) {
+        score += 10;
+        for (let j = 0; j < 12; j++) {
+          particles.push(new Particle(c.x, c.y, '#ffaa33', { speed: rand(2, 5), life: rand(20, 40) }));
+        }
+        floatingTexts.push(new FloatingText(c.x, c.y, '+10', '#ffcc44'));
+        carrots.splice(i, 1);
+        spawnCarrot();
+      } else if (c.life <= 0) {
+        carrots.splice(i, 1);
+      }
+    }
+
+    // خرگوش با آیتم
+    for (let i = powerups.length - 1; i >= 0; i--) {
+      const p = powerups[i];
+      if (dist(rabbit, p) < rabbit.r + p.r) {
+        applyPowerUp(p);
+        powerups.splice(i, 1);
+      } else if (p.life <= 0) {
+        powerups.splice(i, 1);
+      }
+    }
+
+    // خرگوش با گرگ
+    if (rabbit.invuln <= 0) {
+      for (let i = wolves.length - 1; i >= 0; i--)
